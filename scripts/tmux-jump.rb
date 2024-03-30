@@ -12,6 +12,7 @@ HOME_SEQ = "\e[H"
 RESET_COLORS = "\e[0m"
 ENTER_ALTERNATE_SCREEN = "\e[?1049h"
 RESTORE_NORMAL_SCREEN = "\e[?1049l"
+CLEAR_SCREEN = "\033[H\033[J"
 
 # CONFIG
 KEYS_POSITION = ENV['JUMP_KEYS_POSITION']
@@ -145,11 +146,15 @@ end
 def positions_of(jump_to_chars, screen_chars)
   positions = []
 
-  positions << 0 if screen_chars[0] =~ /\w/ && screen_chars[0].downcase == jump_to_chars[0].downcase && screen_chars[1].downcase == jump_to_chars[1].downcase
+  if screen_chars[0] =~ /\w/ \
+      && screen_chars[0].downcase == jump_to_chars[0].downcase \
+      && (jump_to_chars.size == 1 || (screen_chars[1].downcase == jump_to_chars[1].downcase))
+    positions << 0 
+  end
   screen_chars.each_char.with_index do |char, i|
     if (char =~ /\w/).nil? \
       && screen_chars[i+1] && screen_chars[i+1].downcase == jump_to_chars[0] \
-      && screen_chars[i+2] && screen_chars[i+2].downcase == jump_to_chars[1]
+      && (jump_to_chars.size == 1 || (screen_chars[i+2] && screen_chars[i+2].downcase == jump_to_chars[1]))
       positions << i+1
     end
   end
@@ -204,21 +209,25 @@ def prompt_position_index!(positions, screen_chars) # raises Timeout::Error
 end
 
 def main
-  begin
-    chars_read_file = File.new(Config.tmp_file)
-    jump_to_chars = ''
-    jump_to_chars << (read_char_from_file chars_read_file)
-    jump_to_chars << (read_char_from_file chars_read_file)
-  rescue Timeout::Error
-    Kernel.exit
-  ensure
-    File.delete chars_read_file
-  end
   `tmux send-keys -X -t #{Config.pane_nr} cancel` if Config.pane_mode == '1'
   start = -Config.scroll_position
   ending = -Config.scroll_position + Config.pane_height - 1
   screen_chars =
     `tmux capture-pane -p -t #{Config.pane_nr} -S #{start} -E #{ending}`[0..-2].gsub("︎", '') # without colors
+
+  # puts "screen_chars: #{screen_chars}; #{screen_chars.size} chars"
+
+  first_char = prompt_char!
+  # Preview first char
+  positions = positions_of first_char, screen_chars
+  keys = keys_for positions.size
+  key_len = keys.first.size
+
+  second_char = recover_screen_after do
+    draw_keys_onto_tty screen_chars, positions, keys, key_len
+    prompt_char!
+  end
+  jump_to_chars = "#{first_char}#{second_char}"
 
   positions = positions_of jump_to_chars, screen_chars
   position_index = recover_screen_after do
@@ -237,12 +246,25 @@ def main
   `tmux send-keys -X -t #{Config.pane_nr} top-line`
   `tmux send-keys -X -t #{Config.pane_nr} -N #{Config.scroll_position} cursor-up`
   `tmux send-keys -X -t #{Config.pane_nr} -N #{jump_to} cursor-right`
+  #
+  #
+  # `tmux copy-mode -t #{Config.pane_nr}`
+  #  # begin: tmux weirdness when 1st line is empty
+  # `tmux send-keys -X -t #{Config.pane_nr} start-of-line`
+  # `tmux send-keys -X -t #{Config.pane_nr} top-line`
+  # `tmux send-keys -X -t #{Config.pane_nr} -N 200 cursor-right`
+  #  # end
+  # `tmux send-keys -X -t #{Config.pane_nr} start-of-line`
+  # `tmux send-keys -X -t #{Config.pane_nr} top-line`
+  # `tmux send-keys -X -t #{Config.pane_nr} -N #{Config.scroll_position} cursor-up`
+  # `tmux send-keys -X -t #{Config.pane_nr} -N #{jump_to} cursor-right`
 end
 
 if $PROGRAM_NAME == __FILE__
   Config.pane_nr = `tmux display-message -p "\#{pane_id}"`.strip
-  format = '#{pane_id};#{pane_tty};#{pane_in_mode};#{cursor_y};#{cursor_x};'\
-           '#{alternate_on};#{scroll_position};#{pane_height}'
+  format = '#{pane_id};#{pane_tty};#{pane_in_mode};#{cursor_y};#{cursor_x};' \
+           '#{alternate_on};#{scroll_position};#{pane_height};' \
+           '#{copy_cursor_x};#{copy_cursor_y};'
   tmux_data = `tmux display-message -p -t #{Config.pane_nr} -F "#{format}"`.strip.split(';')
   Config.pane_tty_file = tmux_data[1]
   Config.pane_mode = tmux_data[2]
@@ -251,6 +273,8 @@ if $PROGRAM_NAME == __FILE__
   Config.alternate_on = tmux_data[5]
   Config.scroll_position = tmux_data[6].to_i
   Config.pane_height = tmux_data[7].to_i
+  # puts "Cursor X: #{Config.cursor_x}, Cursor Y: #{Config.cursor_y}, Copy X: #{tmux_data[8]}, Copy Y: #{tmux_data[9]}"
   Config.tmp_file = ARGV[0]
+
   main
 end
